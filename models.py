@@ -20,10 +20,14 @@ import matplotlib.pyplot as plt
 from statsmodels.tsa.arima_model import ARMA
 from statsmodels.tsa.arima_model import ARIMA as oldArima
 from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 import statsmodels.api as sm
 
 import itertools
+import plotly.io as pio
+import plotly.graph_objects as go
+from statsmodels.tsa.stattools import pacf, acf
 
 
 
@@ -36,6 +40,9 @@ from numpy import sqrt, argsort
 from sklearn.preprocessing import scale
 from sklearn.metrics import silhouette_score
 import pmdarima as pmd
+
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import LinearRegression
 
 
 def fig_to_uri(in_fig, close_all=True, **save_args):
@@ -66,12 +73,30 @@ def set_model_color(ax):
     ax.title.set_color('#2cfec1')
 
 
+def show_randomForest_model(content,atribute,parameters):
+
+    # Assuming you have a DataFrame named 'df' with columns 'timestamp' and 'value'
+    # Convert the time series data into a supervised learning format
+    assembler = VectorAssembler(inputCols=["lag1", "lag2", "lag3"], outputCol="features")
+    df_lagged = assembler.transform(df)
+
+    # Split the data into training and test sets
+    train_data, test_data = df_lagged.randomSplit([0.8, 0.2])
+
+    # Train the Linear Regression model
+    lr = LinearRegression(featuresCol="features", labelCol="value")
+    model = lr.fit(train_data)
+
+    # Make predictions on the test set
+    predictions = model.transform(test_data)
+
+    # View the predicted values
+    predictions.select("timestamp", "value", "prediction").show()
 
 def show_model(content,atribute,parameters,caller):
 
-
-    train, test = train_test_split(content[atribute], test_size=0.05 ,shuffle=False) 
-    res = (pd.Series(content.index[1:]) - pd.Series(content.index[:-1])).value_counts()
+    train_size = int(len(content[atribute]) * 0.8)
+    train_data, test_data = content[atribute][:train_size], content[atribute][train_size:]
 
     p = parameters['p-value']
     d = parameters['d-value']
@@ -83,63 +108,42 @@ def show_model(content,atribute,parameters,caller):
 
     if q != None:
         if Q != None:
-
-            print("***Entering SARIMA******")
-            #train_resampled = train.resample('Q').mean()
-            model = sm.tsa.SARIMAX(train.values,order=(p,d,q),seasonal_order=(P,D,Q,m),trend='n', enforce_stationarity=False, enforce_invertibility=False)
-            result = model.fit()
-            prediction= result.forecast(len(test)*2, freq = res.index.min(), dynamic = True)
-            index_of_fc = pd.date_range(content.index[-1], periods = len(test) + 1,freq = res.index.min())
-            combined = test.index.union(index_of_fc)
-            fitted_series = pd.Series(prediction, index=combined)
-
+            model = SARIMAX(train_data, order=(p,d,q), seasonal_order=(P,D,Q,m))
         else:
+            model = ARIMA(train_data, order=(p,d,q))
 
-            print("***Entering ARIMA******")
-            model = ARIMA(train.values, order=(p,d,q))
-            result = model.fit()
-            prediction= result.forecast(len(test)*2, freq = res.index.min())
-            index_of_fc = pd.date_range(content.index[-1], periods = len(test) + 1,freq = res.index.min())
-            combined = test.index.union(index_of_fc)
-            fitted_series = pd.Series(prediction, index=combined)
+    model_fit = model.fit()
+    predictions = model_fit.predict(start=len(train_data), end=len(train_data) + len(test_data) - 1)
 
-    else:
+    trace_original = go.Scatter(
+        x=content[atribute].index,
+        y=content[atribute].values,
+        name='Original Data'
+    )
 
-        print("***Entering ARMA******")
-        model = ARMA(train.values, order=(p,d))
-        result = model.fit()
-        prediction= result.predict(len(train) ,len(train) + len(test)*2)
-        index_of_fc = pd.date_range(content.index[-1], periods = len(test) + 1,freq = res.index.min())
-        combined = test.index.union(index_of_fc)
-        fitted_series = pd.Series(prediction[:-1], index=combined)
+# Create a trace for the predicted data
+    trace_predicted = go.Scatter(
+        x=test_data.index,
+        y=predictions,
+        name='Predicted Data'
+    )
 
+# Create the layout
+    layout = go.Layout(
+        title=f'{caller} Prediction',
+        xaxis=dict(title='X-axis Label'),
+        yaxis=dict(title='Y-axis Label')
+    )
 
+    # Create the figure and add the traces
+    fig = go.Figure(data=[trace_original, trace_predicted], layout=layout)
 
-    print("AAAAAAA  --> " +  str(res.index.min()))
-    figure = plt.figure(figsize=(12,5))
-
-
-    plt.plot(train, label='training')
-    plt.plot(test, label='actual')
-    plt.plot(fitted_series, color='darkgreen',label='forecast')
-
-    plt.legend(loc='upper left', fontsize=8)
-    
-    plt.title(caller + ' for ' + atribute)
-
-    figure.set_facecolor("#1f2630")
-
-    ax = plt.axes()
-    set_model_color(ax)
-
-
-    out_url = fig_to_uri(figure)
-    return out_url
+    return fig
 
 
 def show_trace_decompose(image,content,atribute,parameters,chart):
 
-    decomposed = sm.tsa.seasonal_decompose(content[atribute],model = parameters['type'],period = 360) # The frequncy is annual
+    decomposed = sm.tsa.seasonal_decompose(content[atribute],model = parameters['type']) # The frequncy is annual
 
     if image == 'seasonal':
         chart.add_trace(go.Scatter(x=content.index, y=decomposed.seasonal,
@@ -162,54 +166,38 @@ def show_trace_decompose(image,content,atribute,parameters,chart):
                     name=image,
                     showlegend=True))
 
-
-
-
-def show_decompose(image,content,atribute,parameters):
-
-    decomposed = sm.tsa.seasonal_decompose(content[atribute],model = parameters['type'],period = 360) # The frequncy is annual
-
-    if image == 'seasonal':
-        trendi = decomposed.seasonal.plot()
-        plt.title('Seasonality of ' + atribute)
-    if image == 'trend':
-        trendi = decomposed.trend.plot()
-        plt.title('Trend of ' + atribute)
-    if image == 'resid':
-        trendi = decomposed.resid.plot()
-        plt.title('Residual of ' + atribute)
-    if image == 'observed':
-        trendi = decomposed.observed.plot()
-        plt.title('Observed of ' + atribute)
-
-
-    figure_trendi = trendi.figure
-    figure_trendi.set_facecolor("#1f2630")
-
-    ax = plt.axes()
-    set_model_color(ax)
-
-    out_url = fig_to_uri(figure_trendi)
-    return out_url
-
 def show_correlation(content,atribute, parameters):
 
     lag_value = parameters['value']
     mode = parameters['type']
+    plot_pacf = False
 
-    if mode == 'auto':
-        model = plot_acf(content[atribute],lags=lag_value,title=atribute)
-    else:
-        model = plot_pacf(content[atribute],lags=lag_value,title=atribute)
+    # fig, ax = plt.subplots()
 
-    model.set_facecolor("#1f2630")
-    plt.title( mode + "correlation for " + atribute)
+    if mode == 'partial':
+        plot_pacf = True
 
-    ax = plt.axes()
-    set_model_color(ax)
+    corr_array = pacf(content[atribute].dropna(), alpha=0.05, nlags=lag_value) if plot_pacf else acf(content[atribute].dropna(), alpha=0.05, nlags=lag_value)
+    lower_y = corr_array[1][:,0] - corr_array[0]
+    upper_y = corr_array[1][:,1] - corr_array[0]
 
-    out_url = fig_to_uri(model)
-    return out_url
+    fig = go.Figure()
+    [fig.add_scatter(x=(x,x), y=(0,corr_array[0][x]), mode='lines',line_color='#3f3f3f') 
+     for x in range(len(corr_array[0]))]
+    fig.add_scatter(x=np.arange(len(corr_array[0])), y=corr_array[0], mode='markers', marker_color='#1f77b4',
+                   marker_size=12)
+    fig.add_scatter(x=np.arange(len(corr_array[0])), y=upper_y, mode='lines', line_color='rgba(255,255,255,0)')
+    fig.add_scatter(x=np.arange(len(corr_array[0])), y=lower_y, mode='lines',fillcolor='rgba(32, 146, 230,0.3)',
+            fill='tonexty', line_color='rgba(255,255,255,0)')
+    fig.update_traces(showlegend=False)
+    fig.update_xaxes(range=[-1,42])
+    fig.update_yaxes(zerolinecolor='#000000')
+    
+    title='Partial Autocorrelation (PACF)' if plot_pacf else 'Autocorrelation (ACF)'
+    fig.update_layout(title=title)
+    
+    return fig
+
 
 
 
@@ -232,19 +220,18 @@ def compare(filtered_data,extra_filtered_data,attribute,pam1,pam2):
 
 
     out_url = fig_to_uri(plt)
-    print(out_url)
 
     return out_url
 
 
 def do_model(model_value,filtered_data,atribute, model_params):
 
-    if model_value == 'arma':
-        model = show_model(filtered_data,atribute, model_params['arma'], "ARMA")
     if model_value == 'arima':
         model = show_model(filtered_data,atribute, model_params['arima'], "ARIMA")
+
     if model_value == 'sarima':
         model = show_model(filtered_data,atribute, model_params['sarima'], 'SARIMA')
+
     if model_value == 'correlation':
         model = show_correlation(filtered_data,atribute, model_params['correlation'])
 
@@ -297,7 +284,7 @@ def checkModelValue(value,index):
                     ),
         )
 
-    if value == 'arma'  or value == 'arima' or value == 'sarima' :
+    if value == 'arima' or value == 'sarima' :
         addable.append(html.Div( id = "modelBox",
                         style={'fontColor': 'blue'},
                         children=[
@@ -316,15 +303,6 @@ def checkModelValue(value,index):
                                 placeholder="input {}".format("d"),
                                 className="just-inputs",
                             ),
-                        ]
-                    ),
-            )
-
-    if value == 'arima' or value == 'sarima':
-        addable.append(html.Div( id = "modelBox",
-                        style={'fontColor': 'blue'},
-                        children=[
-                            html.Div(children="Specific Custom " + value.upper() + " parameters", className="menu-title"),
                             html.Div(children="Trend moving average order.", className="menu-title"),
                             dcc.Input(
                                 id={"type" : "q-" + value + "-option", "index" : index},
@@ -335,7 +313,6 @@ def checkModelValue(value,index):
                         ]
                     ),
             )
-
 
     if value == 'sarima':
         addable.append(html.Div( id = "modelBox",
@@ -374,9 +351,7 @@ def checkModelValue(value,index):
                     ),
             )
 
-    if value == 'arma':
-        addable.append(dcc.Input(id={"type" : "q-" + value + "-option", "index" : index},style={'display': 'none'}))
-    if value == 'arima' or value =='arma':
+    if value == 'arima':
         addable.append(dcc.Input(id={"type" : "P-" + value + "-option", "index" : index},style={'display': 'none'}))
         addable.append(dcc.Input(id={"type" : "D-" + value + "-option", "index" : index},style={'display': 'none'}))
         addable.append(dcc.Input(id={"type" : "Q-" + value + "-option", "index" : index},style={'display': 'none'}))
@@ -403,15 +378,12 @@ def show_KClustering(filtered_data,attribute,chart):
         if float(silhouette_avg) > silhouette_value:
             silhouette_value = float(silhouette_avg)
             actual_n_clusters_value = n_clusters
-            print(actual_n_clusters_value)
 
     model = KMeans(n_clusters = actual_n_clusters_value, max_iter=10, random_state=0, algorithm="elkan").fit(filtered_data[attribute].values.reshape(-1,1))
 
     filtered_data['anomaly']=model.predict(filtered_data[attribute].values.reshape(-1,1))
 
     pd.set_option("display.max_rows", None, "display.max_columns", None)
-    print(filtered_data['anomaly'])
-    print(type(filtered_data['anomaly']))
 
     mask = (
         (filtered_data.anomaly == actual_n_clusters_value - 1)

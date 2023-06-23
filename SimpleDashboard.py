@@ -17,9 +17,8 @@ from io import BytesIO
 import plotly.graph_objs as go
 import cufflinks as cf
 
+import matplotlib
 import matplotlib.pyplot as plt
-from statsmodels.tsa.arima.model import ARIMA
-#from statsmodels.tsa.arima.model import SARIMAX
 from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.tsa.ar_model import AutoReg
 from statsmodels.tsa.stattools import adfuller
@@ -47,6 +46,9 @@ from sklearn.preprocessing import scale
 from sklearn.metrics import silhouette_score
 import pmdarima as pmd
 
+from pyspark.sql import SparkSession
+import dash_uploader as du
+
 
 
 data = None
@@ -55,6 +57,8 @@ DEFAULT_OPACITY = 0.8
 
 def configurations():
 
+    spark = SparkSession.builder.config("spark.ui.enabled", "false").getOrCreate()
+
     external_stylesheets = [
         {
             "href": "https://fonts.googleapis.com/css2?"
@@ -62,7 +66,9 @@ def configurations():
             "rel": "stylesheet",
         },
     ]
+    current_directory = os.getcwd()
     app = Dash(__name__, external_stylesheets=external_stylesheets,)
+    du.configure_upload(app, f"{current_directory}/data")
     server = app.server
     app.config['suppress_callback_exceptions'] = True
     app.title = "Addable"
@@ -84,13 +90,19 @@ def configurations():
                     ),
 
                 html.Div([
-                            dcc.Upload(
+                            du.Upload(
                                 id='upload-data',
-                                children=html.Div([
-                                html.A('Upload your csv file')
-                                                 ]),
+                                text='Drag and Drop files here',
+                                text_completed='Completed: ',
+                                pause_button=False,
+                                cancel_button=True,
+                                max_file_size=1800,  # 1800 Mb
+                                filetypes=['csv', 'rar'],
+                                # children=html.Div([
+                                # html.A('Upload your csv file')
+                                #                  ]),
 
-                                multiple=True
+                                # multiple=True
                             )
                         ]
                         ),
@@ -139,7 +151,7 @@ def configurations():
 
         return correlation_data
 
-    for store in ('arma','arima','sarima'):
+    for store in ('arima','sarima'):
 
         @app.callback(Output({'type' : 'model-' + store + '-output', 'index': MATCH}, 'data'),
             [
@@ -159,8 +171,6 @@ def configurations():
             else:
                 field_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
-            if store == 'arma':
-                return {'p-value':p_value, 'd-value':d_value}
             if store == 'arima':
                 return {'p-value':p_value, 'd-value':d_value,'q-value':q_value}
             if store == 'sarima':
@@ -171,13 +181,12 @@ def configurations():
         [
             Input({'type' : 'decompose-output', 'index': MATCH}, 'data'),
             Input({'type' : 'correlation-output', 'index': MATCH}, 'data'),
-            Input({'type' : 'model-arma-output', 'index': MATCH}, 'data'),
             Input({'type' : 'model-arima-output', 'index': MATCH}, 'data'),
             Input({'type' : 'model-sarima-output', 'index': MATCH}, 'data'),
             State({'type' : 'store-output', "index" : MATCH}, 'data')
         ],prevent_initial_call=True
     )
-    def combine_store_parameters(decompose, correlation, arma, arima, sarima, output):
+    def combine_store_parameters(decompose, correlation, arima, sarima, output):
 
         ctx = dash.callback_context
         if not ctx.triggered:
@@ -192,14 +201,10 @@ def configurations():
         if "correlation-output" in field_id :
             output['correlation'] = correlation
 
-        if "model-arma-output" in field_id :
-            output['arma'] = arma
-
         if  "model-arima-output" in field_id :
             output['arima'] = arima
 
         if "model-sarima-output" in field_id :
-            print("were in")
             output['sarima'] = sarima
 
         return output
@@ -207,22 +212,23 @@ def configurations():
     # upload file callback
     @app.callback(Output('output-data-upload', 'children'),
             [
-                Input('upload-data', 'contents'),
-                Input('upload-data', 'filename'),
-
+                #Input('upload-data', 'contents'),
+                Input('upload-data', 'isCompleted'),
+                State('upload-data', 'fileNames'),
             ],prevent_initial_call=True
     )
-    def update_table(contents, filename):
+    def update_table(isCompleted, filenames):
 
-        if contents is None:
+        if not isCompleted:
             raise PreventUpdate
 
         table = html.Div()
 
-        if contents:
-            contents = contents[0]
-            filename = filename[0]
-            df = parse_data(contents, filename)
+        if isCompleted:
+            filename = filenames[0]
+
+            filename = 'data/'+filename
+            df = pd.read_csv(filename)
 
             df = pd.concat([df.head(10), df.tail(10)], axis=0)
 
@@ -372,7 +378,6 @@ def configurations():
                                     dcc.Checklist(
                                         id={"type" : "Models-Checklist", "index" : n_clicks},
                                         options=[
-                                            {'label': 'ARMA', 'value': 'arma'},
                                             {'label': 'ARIMA', 'value': 'arima'},
                                             {'label': 'SARIMA', 'value': 'sarima'},
                                             {'label': 'Decomposition', 'value': 'decompose'},
@@ -406,27 +411,9 @@ def configurations():
                             ),
 
                             html.Div(
-                                children = [
-                                    html.Div(children="Automate-Prediction-Checklist", className="menu-title"),
-                                    dcc.Checklist(
-                                        id={"type" : "Automate-Checklist", "index" : n_clicks},
-                                        options=[
-                                            {'label': 'Seasonality', 'value': 'yeseason'},
-                                        ],
-                                        value = [],
-                                        style = {'display' : 'inline-block'},
-                                        className="automationList",
-                                    ),
-                                ],
-
-                                className="configs-container",
-                            ),
-
-                            html.Div(
                                 children=[
                                     dbc.Button("Go Plot", id={'type' : 'do-plots', 'index' : n_clicks },className="menu-title",n_clicks=0),
                                     dbc.Button("Compare", id={'type' : 'compare', 'index' : n_clicks },className="menu-title",n_clicks=0),
-                                    dbc.Button('Automate Prediction', id={"type" : "automated-prediction", "index" : n_clicks},n_clicks=0,size="lg",className = 'menu-title'),
                                 ],
                                 className = "configs-container"
                             ),
@@ -485,14 +472,12 @@ def configurations():
                 data = {
                     'decomposition' : {'type' : 'additive'},
                     'correlation' : {'type' : 'auto', 'value' : 25},
-                    'arma' : {'p-value' : 3, 'd-value' : 3,},
                     'arima' : {'p-value' : 2, 'd-value' : 1,'q-value' : 0},
                     'sarima' : {'p-value' : 0, 'd-value' : 0,'q-value' : 1, 'P-value' : 1, "D-value" : 1, 'Q-value' : 1, 'm-value' : None},
                 }
             ),
             dcc.Store(id = {'type' : 'decompose-output', 'index' : n_clicks}, data = {}),
             dcc.Store(id = {'type' : 'correlation-output', 'index' : n_clicks}, data = {}),
-            dcc.Store(id = {'type' : 'model-arma-output', 'index' : n_clicks}, data = {}),
             dcc.Store(id = {'type' : 'model-arima-output', 'index' : n_clicks}, data = {}),
             dcc.Store(id = {'type' : 'model-sarima-output', 'index' : n_clicks}, data = {}),
             dcc.Store(id = {'type' : 'separators-output', 'index' : n_clicks}, data = {}),
@@ -639,15 +624,15 @@ def configurations():
     @app.callback([Output({'type':'YAxis-filter', 'index': MATCH}, 'options'),Output({'type' : 'Parameter-column', 'index': MATCH}, 'options'),Output({"type":"years-slider","index":MATCH},'value'),Output({"type":"years-slider","index":MATCH},'min'),Output({"type":"years-slider","index":MATCH},'max'),Output({"type":"years-slider","index":MATCH},'marks'),],
             [
                 Input("submit-val","n_clicks"),
-                State('upload-data', 'contents'),
-                State('upload-data', 'filename'),
+                #State('upload-data', 'contents'),
+                State('upload-data', 'isCompleted'),
+                State('upload-data', 'fileNames'),
                 State({'type':'YAxis-filter', 'index': MATCH}, "id")
             ]
     )
-    def update_default_fields(n_clicks, contents, filename, id):
+    def update_default_fields(n_clicks, isCompleted, filenames, id):
 
-        print(n_clicks)
-        if contents is None:
+        if not isCompleted:
             raise PreventUpdate
 
         if id.get('index') != n_clicks:
@@ -659,15 +644,18 @@ def configurations():
 
         global data
 
-        filename = filename[0]
+        filename = filenames[0]
 
         filename = 'data/'+filename
+        print(filename)
         with open(filename, "r") as f:
             reader = csv.reader(f)
             headers = next(reader)
 
         data = pd.read_csv(filename,index_col='Date', parse_dates=['Date'])
         data.sort_index(inplace=True)
+        # spark_df = spark.createDataFrame(data)
+        # spark_df.show()
         #data = data.fillna(method='ffill')
         attribute_options=[ {'label': i, 'value': i} for i in headers if i != '' if i !='Date' ]
         Parameter_options=[ {'label': i, 'value': i} for i in headers if i !='Date' ]
@@ -724,75 +712,10 @@ def configurations():
         Parameter_options=[ {'label': i, 'value': i} for i in np.sort(getattr(data,value).unique())]
         return Parameter_options
 
-    def automate_prediction(content,atribute,seasonality):
-
-        content[atribute] = content[atribute].fillna(method='ffill')
-
-        train, test = train_test_split(content[atribute], test_size=0.1 ,shuffle=False)
-
-        res = (pd.Series(content.index[1:]) - pd.Series(content.index[:-1])).value_counts()
-        train, test = train_test_split(content[atribute], test_size=0.05 ,shuffle=False)
-
-        if seasonality == True:
-
-            model = pmd.auto_arima(train.values, start_p=1, start_q=1,
-                         test='adf',
-                         max_p=5, max_q=5, m=12, max_P=5,max_Q=5,
-                         start_P=1, seasonal=True,
-                         d=0, D=1,start_Q=1, trace=True,
-                         error_action='ignore',
-                         suppress_warnings=True,
-                         stepwise=True)
-        else:
-            model = pmd.auto_arima(train.values, start_p=1, start_q=1,
-                      test='adf',
-                      max_p=3, max_q=3,
-                      m=12,
-                      d=1,
-                      seasonal=False,
-                      trace=True,
-                      error_action='ignore',
-                      suppress_warnings=True,
-                      stepwise=True)
-
-        model.fit(train.values)
-
-        fitted, confint = model.predict(n_periods=len(test)*2, return_conf_int=True, freq = res.index.min())
-
-        index_of_fc = pd.date_range(content.index[-1], periods = len(test) + 1,freq = res.index.min())
-
-        combined = test.index.union(index_of_fc)
-
-        fitted_series = pd.Series(fitted, index=combined)
-        lower_series = pd.Series(confint[:, 0], index=combined)
-        upper_series = pd.Series(confint[:, 1], index=combined)
-
-        figure = plt.figure(figsize=(12,5))
-
-        plt.plot(train, label='training')
-        plt.plot(test, label='actual')
-        plt.plot(fitted_series, color='darkgreen',label='forecast')
-        plt.fill_between(lower_series.index, 
-                 lower_series, 
-                 upper_series, 
-                 color='#DCDCDC', alpha=.15)
-        plt.legend(loc='upper left', fontsize=8)
-
-        plt.title('Automated Prediction for ' + atribute)
-
-        figure.set_facecolor("#1f2630")
-
-        ax = plt.axes()
-        set_model_color(ax)
-
-        out_url = fig_to_uri(figure)
-        return out_url
-
     # main callback for plot generation
     @app.callback([
         Output({'type' : "price-chart", 'index' : MATCH}, "figure"),Output({'type' : "other-charts", 'index' : MATCH},"children")],
         [
-            Input({'type' : 'automated-prediction', 'index' : MATCH}, "n_clicks"),
             Input({'type' : "do-plots", 'index' : MATCH}, "n_clicks"),
             Input({'type' : "compare", 'index' : MATCH}, "n_clicks"),
             State({'type' : 'years-slider', 'index' : MATCH}, "value"),
@@ -805,10 +728,9 @@ def configurations():
             State({'type' : "Extra-Parameter-filter", 'index' : MATCH}, "value"),
             State({'type' : 'store-output', 'index' : MATCH}, 'data'),
             State({'type' : 'separators-output', 'index' : MATCH}, 'data'),
-            State({'type' : "Automate-Checklist", 'index' : MATCH}, "value"),
         ], prevent_initial_call=True
     )
-    def update_charts(automated_prediction,n_clicks,compare_clicks,constraint,attribute,Parameter,parameter_column,checklist_values,model_values,anomaly_checklist,extra_parameter, model_params, extra_separator_params, automate_params):
+    def update_charts(n_clicks,compare_clicks,constraint,attribute,Parameter,parameter_column,checklist_values,model_values, anomaly_checklist, extra_parameter, model_params, extra_separator_params):
 
         if data is None:
             raise PreventUpdate
@@ -849,8 +771,6 @@ def configurations():
                 font=dict(color="#2cfec1"),
                 autosize=True)
 
-        print(adfuller(filtered_data[attribute]))
-
         # plotly traces
         express_chart_figure.add_trace(go.Scatter(x=filtered_data.index, y=filtered_data[attribute],
                     mode='lines',
@@ -868,27 +788,15 @@ def configurations():
             if value != "":
                 if value =='decompose' :
                     for im in ('trend','seasonal','resid','observed'):
-                        image = html.Img(id = im, src = show_decompose(im,filtered_data,attribute,model_params['decomposition'])),
-                        children.append(image)
-
                         show_trace_decompose(im,filtered_data,attribute,model_params['decomposition'],express_chart_figure)
 
-                elif value == "correlation" or value == "arma" or value == "arima" or value == "sarima":
-                    image = html.Img(id = value, src = do_model(value,filtered_data,attribute,model_params)),
-                    children.append(image)
+                elif value == "correlation" or value == "arima" or value == "sarima":
+                    plotly_figure = do_model(value,filtered_data,attribute,model_params)
+                    graph = dcc.Graph(figure=plotly_figure)
+                    children.append(graph)
 
-        #anomalies
         for value in anomaly_checklist:
             show_anomaly_detection(value,filtered_data,attribute,express_chart_figure)
-    
-        # automated-prediction
-        if automated_prediction != 0:
-
-            if 'yeseason' in automate_params:
-                image = html.Img(id = "automated-seasonality", src = automate_prediction(filtered_data,attribute,True)),
-            else:
-                image = html.Img(id = "automated-nonseasonality", src = automate_prediction(filtered_data,attribute,False)),
-            children.append(image)
 
         #comparable attribute
         if extra_parameter:
